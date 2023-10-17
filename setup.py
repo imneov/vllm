@@ -85,7 +85,7 @@ if not compute_capabilities:
     device_count = torch.cuda.device_count()
     for i in range(device_count):
         major, minor = torch.cuda.get_device_capability(i)
-        if major < 7:
+        if major < 6: # Support Device Capability 6 (eg. GeForce GTX 1080)
             raise RuntimeError(
                 "GPUs with compute capability below 7.0 are not supported.")
         compute_capabilities.add(f"{major}.{minor}")
