@@ -1,0 +1,122 @@
+{
+  "$schema": "https://aka.ms/codetour-schema",
+  "title": "vLLM",
+  "steps": [
+    {
+      "file": "vllm/entrypoints/llm.py",
+      "description": "# User Interface::Synchronous\n\nEnd-user Interface",
+      "line": 13
+    },
+    {
+      "file": "vllm/entrypoints/api_server.py",
+      "description": "# User Interface::Asynchronous",
+      "line": 21
+    },
+    {
+      "file": "vllm/core/block_manager.py",
+      "description": "# block_manager::BlockAllocator\n\nblock_manager包含了逻辑块和物理块的相互映射.\n\ndevice：有CPU类型\n\nblock_size：块大小，一般提供 16，32\n\nnum_blocks：Block数量\n\n提前分配好 PhysicalTokenBlock",
+      "line": 16
+    },
+    {
+      "file": "vllm/core/block_manager.py",
+      "description": "# block_manager::BlockSpaceManager\n\n```\nself.block_size = block_size               # block 大小\nself.num_total_gpu_blocks = num_gpu_blocks # block 数量\nself.num_total_cpu_blocks = num_cpu_blocks # block 数量 Swap 模式使用\n\nself.block_sliding_window = None\nif sliding_window is not None:\n    assert sliding_window % block_size == 0, (sliding_window, block_size)\n    self.block_sliding_window = sliding_window // sliding_window 批量申请Block\n\nself.watermark = watermark  # 防止显存过高导致缓存切换\nassert watermark >= 0.0\n\nself.watermark_blocks = int(watermark * num_gpu_blocks)\nself.gpu_allocator = BlockAllocator(Device.GPU, block_size, num_gpu_blocks)\nself.cpu_allocator = BlockAllocator(Device.CPU, block_size, num_cpu_blocks)\n\n# Mapping: seq_id -> BlockTable.\nself.block_tables: Dict[int, BlockTable] = {}\n```",
+      "line": 59
+    },
+    {
+      "file": "vllm/core/scheduler.py",
+      "description": "# Before serving requests::Scheduler",
+      "line": 68
+    },
+    {
+      "file": "vllm/core/policy.py",
+      "description": "## Before serving requests::Policy\n \nFCFS: First Come, First Served ",
+      "line": 27
+    },
+    {
+      "file": "vllm/engine/llm_engine.py",
+      "description": "# Before serving requests::Worker Init\n",
+      "line": 141
+    },
+    {
+      "file": "vllm/worker/worker.py",
+      "description": "# Before serving requests::Worker.model\n\nvllm/model_executor/models",
+      "line": 68
+    },
+    {
+      "file": "vllm/model_executor/models/gpt2.py",
+      "description": "# Before serving requests::load_weights",
+      "line": 235
+    },
+    {
+      "file": "vllm/model_executor/models/gpt2.py",
+      "description": "# Before serving requests::Model",
+      "line": 71
+    },
+    {
+      "file": "vllm/model_executor/layers/attention.py",
+      "description": "# Before serving requests::PagedAttention\n\nattention_ops.single_query_cached_kv_attention -> CUDA::single_query_cached_kv_attention\n",
+      "line": 152
+    },
+    {
+      "file": "setup.py",
+      "description": "# Before serving requests::CUDA\nhttps://github.com/apachecn/pytorch-doc-zh/blob/master/docs/1.0/cpp_extension.md\n\nCUDA 的操作与 PyTorch 的集成同样十分简单。如果你想写一个`setup.py`脚本，它可能看起来像这样：\n\n```py\nfrom setuptools import setup\nfrom torch.utils.cpp_extension import BuildExtension, CUDAExtension\n\nsetup(\n    name='lltm',\n    ext_modules=[\n        CUDAExtension('lltm_cuda', [\n            'lltm_cuda.cpp',\n            'lltm_cuda_kernel.cu',\n        ])\n    ],\n    cmdclass={\n        'build_ext': BuildExtension\n    })\n\n```\n",
+      "line": 140
+    },
+    {
+      "file": "csrc/attention/attention_kernels.cu",
+      "description": "# CUDA::single_query_cached_kv_attention_kernel\n```\n  scalar_t* __restrict__ out,             // [num_seqs, num_heads, head_size]\n  const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]\n  const scalar_t* __restrict__ k_cache,   // [num_blocks, num_kv_heads, head_size/x, block_size, x]，最后一个x是vectorize，一个thread fetch一个vector\n  const scalar_t* __restrict__ v_cache,   // [num_blocks, num_kv_heads, head_size, block_size], num_blocks * block_size=seqlen\n  const int* __restrict__ head_mapping,   // [num_heads]，q与kv的head map\n  const float scale,\n  const int* __restrict__ block_tables,   // [num_seqs, max_num_blocks_per_seq],2d数组，每个子数组是每个seq的存储kv的physical block nums\n  const int* __restrict__ context_lens,   // [num_seqs]，每个句子的长度\n  const int max_num_blocks_per_seq, //(max(context_lens) + block_size - 1) / block_size \n  const float* __restrict__ alibi_slopes, // [num_heads]\n  const int q_stride,\n  const int kv_block_stride,//类似于pytorch的stride，每个physical block的stride\n  const int kv_head_stride) //类似于pytorch的stride，每个head的stride\n```\n\n# CUDA::kernel信息和主逻辑\n\n以下是kernel里面线程并行的必备信息，拿到针对每个block/thread在具体维度上的id和offset，也是添了一些注释，直接看以下code snippet：\n\n```\n  constexpr int THREAD_GROUP_SIZE = MAX(WARP_SIZE / BLOCK_SIZE, 1);// 每个thread_group 处理blocksize中的1个token，每个token又有numheads * headsize个element，每个block有block size个token，\n  constexpr int NUM_THREAD_GROUPS = NUM_THREADS / THREAD_GROUP_SIZE; // Note: This assumes THREAD_GROUP_SIZE divides NUM_THREADS\n  \n  //每组thread处理的token数量，最小为1\n  constexpr int NUM_TOKENS_PER_THREAD_GROUP = (BLOCK_SIZE + WARP_SIZE - 1) / WARP_SIZE;\n  constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;\n  const int thread_idx = threadIdx.x;\n  const int warp_idx = thread_idx / WARP_SIZE;\n  const int lane = thread_idx % WARP_SIZE;\n\n  const int head_idx = blockIdx.x; // 一个block负责一个head，headsize*blocksize的数据\n  const int num_heads = gridDim.x;\n  const int kv_head_idx = head_mapping[head_idx]; // q head id --> kv head id\n  const int seq_idx = blockIdx.y; // y维度的一个block负责一个seq\n\n  // 每个thread group 向量化load&store，这里其实我有点疑问，为什么是以thread group为单位load 16*8=128bit数据，而不是以thread，因为CUDA每个thread一次性最大可以访问128bit数据\n  constexpr int VEC_SIZE = MAX(16 / (THREAD_GROUP_SIZE * sizeof(scalar_t)), 1); \n  using K_vec = typename Vec<scalar_t, VEC_SIZE>::Type;\n  using Q_vec = typename Vec<scalar_t, VEC_SIZE>::Type;\n  // 1个thread group处理一个head里面的head size\n  constexpr int NUM_ELEMS_PER_THREAD = HEAD_SIZE / THREAD_GROUP_SIZE;\n  constexpr int NUM_VECS_PER_THREAD = NUM_ELEMS_PER_THREAD / VEC_SIZE;\n  // 当前thread所在的thread group\n  const int thread_group_idx = thread_idx / THREAD_GROUP_SIZE;\n  // 当前thread在thread group内的offset\n  const int thread_group_offset = thread_idx % THREAD_GROUP_SIZE;\n```",
+      "line": 74
+    },
+    {
+      "file": "vllm/worker/worker.py",
+      "description": "# Before serving requests::Profile memory usage\n\n```\n# Profile the memory usage of the model and get the maximum number of\n# cache blocks that can be allocated with the remaining free memory.\n\n# Profile memory usage with max_num_sequences sequences and the total\n# number of tokens equal to max_num_batched_tokens.\n\n# Enable top-k sampling to reflect the accurate memory usage.\n\n# Execute the model.\n\n# Calculate the number of blocks that can be allocated with the\n# profiled peak memory.\n\n# Reset the seed to ensure that the random state is not affected by\n# the model initialization and profiling.\n\n```\n\n注：InferenceMode是在pytorch1.10版本中引入的新功能，是一个类似于 no_grad 的新上下文管理器，该模式禁用了视图跟踪和版本计数器，所以在此模式下运行代码能够获得更好的性能，速度也会更快。",
+      "line": 72
+    },
+    {
+      "file": "vllm/engine/llm_engine.py",
+      "description": "# Before serving requests::CacheEngine",
+      "line": 218
+    },
+    {
+      "file": "vllm/worker/worker.py",
+      "description": "# Before serving requests::Pre-allocate KV Blocks",
+      "line": 139
+    },
+    {
+      "file": "vllm/engine/llm_engine.py",
+      "description": "# When requests arrive::add_request\n\n1. Tokenization: [1, 450, 5434, 310, 3012, 928, 616, 3159, 28286]\n\n2. Add to the scheduler’s waiting queue\n",
+      "line": 244
+    },
+    {
+      "file": "vllm/engine/async_llm_engine.py",
+      "description": "# When requests arrive::step_async",
+      "line": 177
+    },
+    {
+      "file": "vllm/core/scheduler.py",
+      "description": "# At every step, the scheduler（Fail）\n\nDecide the set of requests to run at the current step.\n\nWhen no KV block memory available for new tokens:\n- Swapping: running → swapped\n- Recomputation: running → waiting",
+      "line": 201
+    },
+    {
+      "file": "vllm/core/scheduler.py",
+      "description": "# At every step, the scheduler（OK）\n\nDecide the set of requests to run at the current step.\nWhen there are free KV block memory\n- waiting → running",
+      "line": 213
+    },
+    {
+      "file": "vllm/worker/worker.py",
+      "description": "# At every step, the worker::execute_model",
+      "line": 286,
+      "selection": {
+        "start": {
+          "line": 1,
+          "character": 1
+        },
+        "end": {
+          "line": 1,
+          "character": 43
+        }
+      }
+    }
+  ],
+  "ref": "ee92b58b3ae28a52c2500674de721e7a718432d8"
+}
